@@ -13,6 +13,7 @@ from keras import backend as K
 from keras.utils import plot_model
 import tensorflow as tf
 from IPython.display import clear_output
+from dataloader import DataLoader
 
 
 def mean_iou(y_true, y_pred):
@@ -24,20 +25,24 @@ def mean_iou(y_true, y_pred):
     return iou
 
 
-class fingernailsegtuning:
+class fingernailseg:
     
     epochs = 50
     batch_size = 4
     val_split = .1
-    sz = (50, 50)
+    sz = (64, 64)
+    # sz = (300, 256)
     
     def __init__(self, dataset):
-        if len(dataset):
-            tar = tarfile.open(dataset)
-            tar.extractall()
-            tar.close()
-        mask_files = os.listdir('nails_segmentation/mask')
-        raw_files = os.listdir('nails_segmentation/raw')
+        self.dataset = dataset
+        self.save_model = 'unet.h5'
+        # if len(dataset):
+        #     tar = tarfile.open(dataset)
+        #     tar.extractall()
+        #     tar.close()
+        # import pdb; pdb.set_trace()
+        mask_files = os.listdir(os.path.join(self.dataset, 'mask'))
+        raw_files = os.listdir(os.path.join(self.dataset, 'raw'))
         # find intersection of two lists
         files = list(set(raw_files).intersection(mask_files))
         test_files = list(set(mask_files).symmetric_difference(raw_files))
@@ -45,7 +50,7 @@ class fingernailsegtuning:
         X_test = []
         y = []
         for f in files:
-            mask = Image.open('nails_segmentation/mask/'+f)
+            mask = Image.open(os.path.join(self.dataset, 'mask/'+f)).convert('RGB')
             mask = np.array(mask.resize(self.sz))
             mask = mask.mean(axis=2)
             mask[mask<250]=0
@@ -53,26 +58,34 @@ class fingernailsegtuning:
             if not mask.sum():
                 continue
             y.append(mask)
-            raw = Image.open('nails_segmentation/raw/'+f)
+            raw = Image.open(os.path.join(self.dataset, 'raw/'+f)).convert('RGB')
             raw = np.array(raw.resize(self.sz))
             X_train.append(raw)
+        dataset = DataLoader(images=X_train,
+                            masks=y,
+                            image_size=(self.sz[0], self.sz[1]),
+                            crop_percent=0.8,
+                            channels=(3, 1),
+                            augment=True,
+                            compose=False,
+                            seed=47)
+        dataset = dataset.process(True)
+
         for f in test_files:
             try:
-                raw = Image.open('nails_segmentation/raw/'+f)
+                raw = Image.open(os.path.join(self.dataset, 'raw/'+f)).convert('RGB')
             except:
                 continue
             raw = np.array(raw.resize(self.sz))
             X_test.append(raw)
-        X_train = np.array(X_train).astype('float32')
-        X_train /= 255
-        X_test = np.array(X_test).astype('float32')
-        X_test /= 255
         self.X_test = X_test
         self.X_train = X_train
-        y = np.array(y)
-        self.y = np.expand_dims(y,3)
+        self.Y_train = np.expand_dims(y,3)
         self.sz = self.sz[::-1] + (3,)
-        
+
+    def prepare_dataset(self):
+        pass
+
     def plot_example(self, im_num = 13):
         plt.figure(figsize=(5,5))
         plt.imshow(self.X_train[im_num,:,:,:])
@@ -91,14 +104,14 @@ class fingernailsegtuning:
         p3 = MaxPooling2D() (c3)
         c4 = Conv2D(64, 3, activation='relu', padding='same') (p3)
         c4 = Conv2D(64, 3, activation='relu', padding='same') (c4)
-        p4 = MaxPooling2D() (c4)
-        c5 = Conv2D(128, 3, activation='relu', padding='same') (p4)
-        c5 = Conv2D(128, 3, activation='relu', padding='same') (c5)
-        u6 = Conv2DTranspose(64, 2, strides=(2, 2), padding='same') (c5)
-        u6 = Concatenate(axis=3)([u6, c4])
-        c6 = Conv2D(64, 3, activation='relu', padding='same') (u6)
-        c6 = Conv2D(64, 3, activation='relu', padding='same') (c6)
-        u7 = Conv2DTranspose(32, 2, strides=(2, 2), padding='same') (c6)
+        # p4 = MaxPooling2D() (c4)
+        # c5 = Conv2D(128, 3, activation='relu', padding='same') (p4)
+        # c5 = Conv2D(128, 3, activation='relu', padding='same') (c5)
+        # u6 = Conv2DTranspose(64, 2, strides=(2, 2), padding='same') (c5)
+        # u6 = Concatenate(axis=3)([u6, c4])
+        # c6 = Conv2D(64, 3, activation='relu', padding='same') (u6)
+        # c6 = Conv2D(64, 3, activation='relu', padding='same') (c6)
+        u7 = Conv2DTranspose(32, 2, strides=(2, 2), padding='same') (c4)
         u7 = Concatenate(axis=3)([u7, c3])
         c7 = Conv2D(32, 3, activation='relu', padding='same') (u7)
         c7 = Conv2D(32, 3, activation='relu', padding='same') (c7)
@@ -115,24 +128,31 @@ class fingernailsegtuning:
 
         self.model.compile(optimizer = Adam(), loss = 'binary_crossentropy', metrics = [mean_iou])
         
-    def build_callbacks(self):
-        checkpointer = ModelCheckpoint(filepath='unet_finetuning.h5', verbose=0, save_best_only=True, save_weights_only=True)
+    def build_callbacks(self, save_model):
+        checkpointer = ModelCheckpoint(filepath=save_model, verbose=0, save_best_only=True, save_weights_only=True)
         stop_train = EarlyStopping(monitor='val_loss', patience=10, verbose=1)
         reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.8,
                     patience=3, min_lr=0.00001)
-        callbacks = [checkpointer, reduce_lr, stop_train, PlotLearning()]
+        callbacks = [checkpointer, reduce_lr, PlotLearning(self.dataset)]
         return callbacks
     
-    def fit(self):
-        self.model.fit(self.X_train, self.y, validation_split=self.val_split, verbose=0, 
-                       batch_size=self.batch_size, epochs=self.epochs, callbacks=self.build_callbacks())
-            
+    def fit(self, model_name):
+        self.model.fit(self.X_train, self.Y_train, validation_split=self.val_split, verbose=0, 
+                       batch_size=self.batch_size, epochs=self.epochs, callbacks=self.build_callbacks(model_name))
+    
+    def finetuning_fit(self, model_name):
+        self.model.fit(self.X_train, self.Y_train, validation_split=self.val_split, verbose=0, 
+                       batch_size=self.batch_size, epochs=self.epochs, callbacks=self.build_callbacks(model_name))
+
     def load_model(self, model_name):
         self.model.load_weights(model_name)
 
     def predict(self):
         return self.model.predict(self.X_test, batch_size=self.batch_size, verbose=0)
-    
+
+    def inference(self, img):
+        return self.model.predict(img, verbose=0)
+
     @classmethod # change NN model
     def change_model(cls, net):
         cls.net = net
@@ -150,9 +170,9 @@ class fingernailsegtuning:
         cls.sz = new_sz
 
 # inheritance for training process plot 
-class PlotLearning(keras.callbacks.Callback, fingernailsegtuning):
-    def __init__(self):
-        fingernailsegtuning.__init__(self, '')
+class PlotLearning(keras.callbacks.Callback, fingernailseg):
+    def __init__(self, dataset):
+        fingernailseg.__init__(self, dataset)
     def on_train_begin(self, logs={}):
         self.i = 0
         self.x = []
